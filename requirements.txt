@@ -1,0 +1,9 @@
+scipy==1.8.0
+torch==1.13.1+cu117
+tensorboard==2.11.0
+torchvision==0.14.1+cu117
+numpy==1.23.3
+matplotlib==3.5.1
+opencv_python==4.5.5.64
+tqdm==4.63.0
+Pillow==9.3.0

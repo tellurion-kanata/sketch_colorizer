@@ -1,8 +1,6 @@
-import os
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import data.utils as utils
 
 from models import *
 
@@ -11,55 +9,75 @@ class DraftDrawer(BaseModel):
     eps = 1e-7
 
     def __init__(self, opt):
-        super(BaseModel, self).__init__(opt)
+        super(DraftDrawer, self).__init__(opt)
         self.initialize()
 
-
     def initialize(self):
-        self.opt_model = 'draftdrawer'
-        self.device = torch.device(self.device)
-
-        self.guide_cnn = resnet50().to(self.device).eval()
-        state_dict = torch.load(self.opt.resnet_path)
-        self.guide_cnn.load_state_dict(state_dict)
+        # Reference encoder is fixed.
+        self.guide_cnn, ref_channels = define_R(
+            model           = self.opt.netR,
+            return_mode     = self.opt.model,
+            gpus            = self.opt.gpus,
+            pretrained      = self.opt.pretrained_R
+        )
         self.set_requires_grad(self.guide_cnn, False)
 
-        self.drawer = Generator().to(self.device)
-        self.discriminator = CustomDiscriminator(in_channels=6).to(self.device)
+        self.G = define_G(
+            ref_channels    = ref_channels,
+            ngf             = self.opt.ngf,
+            attn_type       = self.opt.attn_type,
+            upsample_type   = self.opt.upsample_type,
+            attn_upsample   = not self.opt.no_atup,
+            gpus            = self.opt.gpus
+        )
 
         if not self.opt.eval:
-            self.optimizer_G = optim.Adam(self.drawer.parameters(), lr=self.lr, betas=self.betas)
-            self.optimizer_D = optim.Adam(self.discriminator.parameters(), lr=self.lr, betas=self.betas)
+            self.D = define_D(
+                input_ch    = 4,
+                n_layers    = self.opt.nld,
+                ndf         = self.opt.ndf,
+                spec_norm   = self.opt.use_spec,
+                gpus        = self.opt.gpus
+            )
 
-            self.criterion_GAN = networks.GANLoss(self.opt.gan_mode).to(self.device)
-            self.criterion_SR = networks.SelfRegulationLoss().to(self.device)
-            self.criterion_DR = networks.DisRegulationLoss().to(self.device)
+            if self.opt.optimizer == 'sgd':
+                self.optimizer_G = optim.SGD(self.G.parameters(), lr=self.lr, momentum=self.opt.momentum)
+                self.optimizer_D = optim.SGD(self.D.parameters(), lr=self.lr, momentum=self.opt.momentum)
+            else:
+                self.optimizer_G = optim.Adam(self.G.parameters(), lr=self.lr, betas=self.opt.betas)
+                self.optimizer_D = optim.Adam(self.D.parameters(), lr=self.lr, betas=self.opt.betas)
+
+            self.criterion_GAN = loss.GANLoss(self.opt.gan_mode).to(self.device)
+            self.criterion_tv = loss.TVLoss().to(self.device)
             self.criterion_L1 = nn.L1Loss().to(self.device)
 
             self.optimizers = [self.optimizer_G, self.optimizer_D]
-        self.models = {'drawer': self.drawer, 'discriminator': self.discriminator}
+            self.models = {'G': self.G, 'D': self.D}
+        else:
+            self.models = {'G': self.G}
         self.setup()
 
 
     def read_input(self, input):
-        self.x = input['sketch'].to(self.device)
-        self.reference = input['reference'].to(self.device)
-        self.y = input['color'].to(self.device)
+        self.x = input['input'].to(self.device)
+        self.r = input['ref'].to(self.device)
+        self.y = input['real'].to(self.device)
         self.x_idx = input['index']
 
 
     def forward(self):
-        features_r = self.guide_cnn(self.reference)
-        self.predict_y = self.drawer(self.x, features_r[2])         # only 512 channels feature is used in draft stage
+        fr = self.guide_cnn(self.r)
+        # fr = latent_shuffle(fr, self.training)
+        self.py, _ = self.G(self.x, fr)
 
 
     def backward_D(self):
-        fake_AB = torch.cat((self.x, self.predict_y), 1)        # fake image
-        predict_fake = self.discriminator(fake_AB)
+        fake_AB = torch.cat((self.x, self.py), 1)               # fake image
+        predict_fake = self.D(fake_AB.detach())
         self.loss_D_fake = self.criterion_GAN(predict_fake, False)
 
         true_AB = torch.cat((self.x, self.y), 1)                # real image
-        predict_true = self.discriminator(true_AB)
+        predict_true = self.D(true_AB)
         self.loss_D_true = self.criterion_GAN(predict_true, True)
 
         self.loss_D = (self.loss_D_fake + self.loss_D_true) * 0.5
@@ -67,93 +85,66 @@ class DraftDrawer(BaseModel):
 
 
     def backward_G(self):
-        fake_AB = torch.cat((self.x, self.predict_y), 1)
-        predict_fake = self.discriminator(fake_AB)
+        fake_AB = torch.cat((self.x, self.py), 1)
+        predict_fake = self.D(fake_AB)
         self.loss_GAN = self.criterion_GAN(predict_fake, True)
-        self.loss_L1 = self.criterion_L1(self.predict_y, self.y) * self.opt.lambda_L1
-        self.loss_SR = self.criterion_SR(self.predict_y) * self.opt.lambda_sr
-        self.loss_DR = self.criterion_DR(self.predict_y, self.reference) * self.opt.lambda_dr
+        self.loss_L1 = self.criterion_L1(self.py, self.y) * self.opt.lambda_L1
+        self.loss_tv = self.criterion_tv(self.py) * self.opt.lambda_tv
 
-        self.loss_G = self.loss_GAN + self.loss_L1 + self.loss_SR + self.loss_DR
+        self.loss_G = self.loss_GAN + self.loss_L1 + self.loss_tv
         self.loss_G.backward()
 
 
-    def train(self):
-        self.step = self.opt.start_step
-        if self.opt.load_model:
-            self.load(self.opt.load_epoch)
+    def backward(self):
+        # update discriminator
+        self.set_requires_grad(self.D, True)
+        self.optimizer_D.zero_grad()
+        self.backward_D()
+        self.optimizer_D.step()
 
-        for epoch in range(self.st_epoch, self.ed_epoch):
-            for idx, data in enumerate(self.datasets):
-                self.read_input(data)
-                self.forward()
-
-                # update discriminator
-                self.set_requires_grad(self.discriminator, True)
-                self.optimizer_D.zero_grad()
-                self.backward_D()
-                self.optimizer_D.step()
-
-                # update draft drawer
-                self.set_requires_grad(self.discriminator, False)
-                self.optimizer_G.zero_grad()
-                self.backward_G()
-                self.optimizer_G.step()
-
-                if self.step % self.opt.print_state_freq == 0:
-                    self.set_state_dict()
-                    self.print_training_iter(epoch, idx)
-                if self.step % self.opt.save_model_freq_step == 0:
-                    self.output_samples(epoch, idx)
-                    self.save()
-
-                self.step += 1
-
-            self.save()
-            self.set_state_dict()
-            self.print_training_epoch(epoch)
-
-            if epoch % self.opt.save_model_freq == 0:
-                self.save(epoch)
+        # update draft generator
+        self.set_requires_grad(self.D, False)
+        self.optimizer_G.zero_grad()
+        self.backward_G()
+        self.optimizer_G.step()
 
 
-    def set_state_dict(self, eval=False):
-        self.state_dict = {'loss_D': self.loss_D, 'loss_D_true': self.loss_D_true, 'loss_D_fake': self.loss_D_fake,
-                           'loss_G': self.loss_G, 'loss_GAN': self.loss_GAN, 'loss_L1': self.loss_L1,
-                           'loss_SR': self.loss_SR, 'loss_DR': self.loss_DR}
+    def set_evaluation_outputs(self):
+        self.outputs = {
+            'real': self.y,
+            'fake': self.py
+        }
+        self.clean_img()
 
 
-    def output_samples(self, epoch, index):
-        self.drawer.eval()
+    def set_state_dict(self):
+        self.state_dict = {
+            'loss_D':       self.loss_D.detach().cpu().numpy(),
+            'loss_D_true':  self.loss_D_true.detach().cpu().numpy(),
+            'loss_D_fake':  self.loss_D_fake.detach().cpu().numpy(),
+            'loss_G':       self.loss_G.detach().cpu().numpy(),
+            'loss_GAN':     self.loss_GAN.detach().cpu().numpy(),
+            'loss_L1':      self.loss_L1.detach().cpu().numpy(),
+        }
 
-        with torch.no_grad():
-            self.forward()
 
-            utils.save_image(self.x[0].cpu(), os.path.join(self.sample_path, '{}_{}_input.png'.format(epoch, index)))
-            utils.save_image(self.reference[0].cpu(), os.path.join(self.sample_path, '{}_{}_ref.png'.format(epoch, index)))
-            utils.save_image(self.y[0].cpu(), os.path.join(self.sample_path, '{}_{}_real.png'.format(epoch, index)))
-            utils.save_image(self.predict_y[0].cpu(), os.path.join(self.sample_path, '{}_{}_fake.png'.format(epoch, index)))
+    def log_loss_per_iter(self, bar):
+        bar.set_postfix({'loss_G': self.loss_G.detach().cpu().numpy(),
+                         'loss_D': self.loss_D.detach().cpu().numpy(),
+                         'loss_L1': self.loss_L1.detach().cpu().numpy()})
 
-        self.drawer.train()
 
-    def test(self, load_epoch='latest'):
-        self.drawer.eval()
+    def get_samples(self):
+        self.read_input(self.fixed_samples)
+        self.forward()
+        x = self.x.repeat([1, 3, 1, 1])
+        self.samples = torch.cat([x, self.r, self.y, self.py], dim=3).cpu()
 
-        with torch.no_grad():
-            self.load()
-            data_size = len(self.datasets)
 
-            for idx, data in enumerate(self.datasets):
-                self.read_input(data)
-                self.forward()
+    def clean_img(self):
+        del self.x, self.y, self.r, self.x_idx, self.py
 
-                utils.save_image(self.x.squeeze(0).cpu(),
-                                 os.path.join(self.test_path, load_epoch + '_{}_input.png'.format(self.x_idx[0])))
-                utils.save_image(self.reference.squeeze(0).cpu(),
-                                 os.path.join(self.test_path, load_epoch + '_{}_ref.png'.format(self.x_idx[0])))
-                utils.save_image(self.y.squeeze(0).cpu(),
-                                 os.path.join(self.test_path, load_epoch + '_{}_real.png'.format(self.x_idx[0])))
-                utils.save_image(self.predict_y.squeeze(0).cpu(),
-                                 os.path.join(self.test_path, load_epoch + '_{}_fake.png'.format(self.x_idx[0])))
 
-                print('test proces: [{} / {}] ...'.format(idx + 1, data_size))
+    def clean_loss(self):
+        del self.loss_D, self.loss_D_fake, self.loss_D_true
+        del self.loss_G, self.loss_GAN, self.loss_L1, self.loss_tv
