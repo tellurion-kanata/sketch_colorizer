@@ -21,7 +21,7 @@ Please organize the training/validation/testing dataset as:
 If you don't want to generate reference images for training (which is a little time-consuming), you can use the `latent shuffle` function in __models/modules.py__ during training by cancelling the comment in the `forward` function  in __draft.py__. Note that this only works when the reference encoder is semantically aware (for example, pre-trained for classification or segmentation), and this will suffer approximately 10%-20% deterioration.
  
 ### 2.Training 
-Before training our colorization model, you need to prepare a pre-trained CNN which is used as the reference encoder in our method. We suggest you adopt a CNN which is pre-trained on both ImageNet and [Danbooru2020](https://www.gwern.net/Danbooru2021#danbooru2020) to achieve best colorization performance. By the way, clip image encoder is found inefficient in our paper, but this deterioration can be solved by combining our models with latent diffusion according to our latest experiments.
+Before training our colorization model, you need to prepare a pre-trained CNN which is used as the reference encoder in our method. We suggest you adopt a CNN which is pre-trained on both ImageNet and [Danbooru2020](https://www.gwern.net/Danbooru2021#danbooru2020) to achieve best colorization performance. By the way, clip image encoder is found inefficient in our paper, but this deterioration can be solved by combining our models with latent diffusion according to our latest experiments (changing tag input to arbitrary text prompt).
 
 Using the following command for 1st training:
 ```
