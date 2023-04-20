@@ -1,5 +1,5 @@
 # Introduction
-This repository is the official implementation of paper Two-step Training: Adjustable Sketch Colorization via Reference Image and Text Tag.
+This repository is the official implementation of paper [Two-step Training: Adjustable Sketch Colorization via Reference Image and Text Tag](https://onlinelibrary.wiley.com/doi/full/10.1111/cgf.14791).
 ![overview](figure.png)
 ## Instruction
 To run our code, please install all the libraries required in our implementation by running the command:
