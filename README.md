@@ -34,7 +34,7 @@ python train.py --name [project_name] -d [dataset_path] -pre [pretrained_CNN_pat
 More information regarding training and testing options can be found in __options/options.py__ or by using --help.
 
 ### 3.Testing
-To use our pre-trained model for sketch colorization, download our pre-trained networks from [GoogleDrive]() using the following commands:
+To use our pre-trained model for sketch colorization, download our pre-trained networks from [Releases]() using the following commands:
 For colorization model:
 ```
 python test.py --name [project_name] -d [dataset_path] -pre [pretrained_CNN_path] 
