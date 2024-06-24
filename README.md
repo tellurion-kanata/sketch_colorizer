@@ -1,6 +1,8 @@
 # Introduction
 This repository is the official implementation of paper [Two-step Training: Adjustable Sketch Colorization via Reference Image and Text Tag](https://onlinelibrary.wiley.com/doi/full/10.1111/cgf.14791).
 ![overview](figure.png)
+
+An improved version using LDM has been released in [ColorizeDiffusion](https://github.com/tellurion-kanata/colorizeDiffusion).
 ## Instruction
 To run our code, please install all the libraries required in our implementation by running the command:
 ```
